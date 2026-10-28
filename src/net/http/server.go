@@ -854,15 +854,6 @@ func bufioWriterPool(size int) *sync.Pool {
 	return nil
 }
 
-// newBufioReader should be an internal detail,
-// but widely used packages access it using linkname.
-// Notable members of the hall of shame include:
-//   - github.com/gobwas/ws
-//
-// Do not remove or change the type signature.
-// See go.dev/issue/67401.
-//
-//go:linkname newBufioReader
 func newBufioReader(r io.Reader) *bufio.Reader {
 	if v := bufioReaderPool.Get(); v != nil {
 		br := v.(*bufio.Reader)
@@ -874,29 +865,11 @@ func newBufioReader(r io.Reader) *bufio.Reader {
 	return bufio.NewReader(r)
 }
 
-// putBufioReader should be an internal detail,
-// but widely used packages access it using linkname.
-// Notable members of the hall of shame include:
-//   - github.com/gobwas/ws
-//
-// Do not remove or change the type signature.
-// See go.dev/issue/67401.
-//
-//go:linkname putBufioReader
 func putBufioReader(br *bufio.Reader) {
 	br.Reset(nil)
 	bufioReaderPool.Put(br)
 }
 
-// newBufioWriterSize should be an internal detail,
-// but widely used packages access it using linkname.
-// Notable members of the hall of shame include:
-//   - github.com/gobwas/ws
-//
-// Do not remove or change the type signature.
-// See go.dev/issue/67401.
-//
-//go:linkname newBufioWriterSize
 func newBufioWriterSize(w io.Writer, size int) *bufio.Writer {
 	pool := bufioWriterPool(size)
 	if pool != nil {
@@ -909,15 +882,6 @@ func newBufioWriterSize(w io.Writer, size int) *bufio.Writer {
 	return bufio.NewWriterSize(w, size)
 }
 
-// putBufioWriter should be an internal detail,
-// but widely used packages access it using linkname.
-// Notable members of the hall of shame include:
-//   - github.com/gobwas/ws
-//
-// Do not remove or change the type signature.
-// See go.dev/issue/67401.
-//
-//go:linkname putBufioWriter
 func putBufioWriter(bw *bufio.Writer) {
 	bw.Reset(nil)
 	if pool := bufioWriterPool(bw.Available()); pool != nil {
@@ -1014,18 +978,11 @@ func (c *conn) readRequest(ctx context.Context) (w *response, err error) {
 		return nil, ErrHijacked
 	}
 
-	var (
-		wholeReqDeadline time.Time // or zero if none
-		hdrDeadline      time.Time // or zero if none
-	)
 	t0 := time.Now()
-	if d := c.server.readHeaderTimeout(); d > 0 {
-		hdrDeadline = t0.Add(d)
-	}
+	var wholeReqDeadline time.Time // or zero if none
 	if d := c.server.ReadTimeout; d > 0 {
 		wholeReqDeadline = t0.Add(d)
 	}
-	c.rwc.SetReadDeadline(hdrDeadline)
 	if d := c.server.WriteTimeout; d > 0 {
 		defer func() {
 			c.rwc.SetWriteDeadline(time.Now().Add(d))
@@ -1081,10 +1038,7 @@ func (c *conn) readRequest(ctx context.Context) (w *response, err error) {
 		body.doEarlyClose = true
 	}
 
-	// Adjust the read deadline if necessary.
-	if !hdrDeadline.Equal(wholeReqDeadline) {
-		c.rwc.SetReadDeadline(wholeReqDeadline)
-	}
+	c.rwc.SetReadDeadline(wholeReqDeadline)
 
 	w = &response{
 		conn:          c,
@@ -1299,7 +1253,11 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 
 	w := cw.res
 	keepAlivesEnabled := w.conn.server.doKeepAlives()
-	isHEAD := w.req.Method == "HEAD"
+
+	// Consult w.conn.lastMethod instead of w.req.Method,
+	// just in case a middleware layer modified w.req.
+	isHEAD := w.conn.lastMethod == "HEAD"
+	isCONNECT := w.conn.lastMethod == "CONNECT"
 
 	// header is written out to w.conn.buf below. Depending on the
 	// state of the handler, we either own the map or not. If we
@@ -1411,6 +1369,11 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 		w.closeAfterReply = true
 	}
 
+	if isCONNECT {
+		// Don't reuse a connection after a CONNECT, even if we reject it.
+		w.closeAfterReply = true
+	}
+
 	// We do this by default because there are a number of clients that
 	// send a full request before starting to read the response, and they
 	// can deadlock if we start writing the response with unconsumed body
@@ -1510,7 +1473,13 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 		hasCL = false
 	}
 
-	if w.req.Method == "HEAD" || !bodyAllowedForStatus(code) || code == StatusNoContent {
+	isSuccessfulCONNECT := isCONNECT && code >= 200 && code < 300
+	if isSuccessfulCONNECT {
+		// Tunnel established, connection is no longer HTTP.
+		delHeader("Transfer-Encoding")
+		delHeader("Content-Length")
+		setHeader.contentLength = nil
+	} else if isHEAD || !bodyAllowedForStatus(code) || code == StatusNoContent {
 		// Response has no body.
 		delHeader("Transfer-Encoding")
 	} else if hasCL {
@@ -1560,8 +1529,13 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 		!isProtocolSwitchResponse(w.status, header)
 	if delConnectionHeader {
 		delHeader("Connection")
-		if w.req.ProtoAtLeast(1, 1) {
+		// Don't set Connection: close on a 2xx CONNECT response,
+		// even though we will close the connection if the handler doesn't hijack it.
+		// If the handler does hijack the connection, the Connection: close is confusing.
+		if w.req.ProtoAtLeast(1, 1) && !isSuccessfulCONNECT {
 			setHeader.connection = "close"
+		} else {
+			setHeader.connection = ""
 		}
 	}
 
@@ -1614,7 +1588,7 @@ func writeStatusLine(bw *bufio.Writer, is11 bool, code int, scratch []byte) {
 // It's illegal to call this before the header has been flushed.
 func (w *response) bodyAllowed() bool {
 	if !w.wroteHeader {
-		panic("")
+		panic("net/http: bodyAllowed called before the header was written")
 	}
 	return bodyAllowedForStatus(w.status)
 }
@@ -2017,6 +1991,10 @@ func (c *conn) serve(ctx context.Context) {
 	c.bufr = newBufioReader(c.r)
 	c.bufw = newBufioWriterSize(checkConnErrorWriter{c}, 4<<10)
 
+	if d := c.server.readHeaderTimeout(); d > 0 {
+		c.rwc.SetReadDeadline(time.Now().Add(d))
+	}
+
 	protos := c.server.protocols()
 	if c.tlsState == nil && protos.UnencryptedHTTP2() {
 		if c.maybeServeUnencryptedHTTP2(ctx) {
@@ -2146,7 +2124,11 @@ func (c *conn) serve(ctx context.Context) {
 			return
 		}
 
-		c.rwc.SetReadDeadline(time.Time{})
+		if d := c.server.readHeaderTimeout(); d > 0 {
+			c.rwc.SetReadDeadline(time.Now().Add(d))
+		} else {
+			c.rwc.SetReadDeadline(time.Time{})
+		}
 	}
 }
 
@@ -2209,6 +2191,8 @@ func (c *conn) maybeServeUnencryptedHTTP2(ctx context.Context) bool {
 		return false
 	}
 	c.setState(c.rwc, StateActive, skipHooks)
+	c.rwc.SetReadDeadline(time.Time{})
+	c.rwc.SetWriteDeadline(time.Time{})
 	h := unencryptedHTTP2Request{ctx, c.rwc, serverHandler{c.server}}
 	fn(c.server, unencryptedTLSConn(c.rwc), h)
 	return true
@@ -2408,7 +2392,7 @@ func Redirect(w ResponseWriter, r *Request, url string, code int) {
 		// but doing it ourselves is more reliable.
 		// See RFC 7231, section 7.1.2
 		if u.Scheme == "" && u.Host == "" {
-			oldpath := r.URL.Path
+			oldpath := r.URL.EscapedPath()
 			if oldpath == "" { // should not happen, but avoid a crash if it does
 				oldpath = "/"
 			}
@@ -2704,7 +2688,7 @@ func (mux *ServeMux) findHandler(r *Request) (h Handler, patStr string, _ *patte
 		// but the path canonicalization does not.
 		_, _, u := mux.matchOrRedirect(host, r.Method, path, r.URL)
 		if u != nil {
-			return RedirectHandler(u.String(), StatusMovedPermanently), u.Path, nil, nil
+			return RedirectHandler(u.String(), StatusTemporaryRedirect), u.Path, nil, nil
 		}
 		// Redo the match, this time with r.Host instead of r.URL.Host.
 		// Pass a nil URL to skip the trailing-slash redirect logic.
@@ -2720,7 +2704,7 @@ func (mux *ServeMux) findHandler(r *Request) (h Handler, patStr string, _ *patte
 		var u *url.URL
 		n, matches, u = mux.matchOrRedirect(host, r.Method, path, r.URL)
 		if u != nil {
-			return RedirectHandler(u.String(), StatusMovedPermanently), n.pattern.String(), nil, nil
+			return RedirectHandler(u.String(), StatusTemporaryRedirect), n.pattern.String(), nil, nil
 		}
 		if path != escapedPath {
 			// Redirect to cleaned path.
@@ -2729,7 +2713,7 @@ func (mux *ServeMux) findHandler(r *Request) (h Handler, patStr string, _ *patte
 				patStr = n.pattern.String()
 			}
 			u := &url.URL{Path: path, RawQuery: r.URL.RawQuery}
-			return RedirectHandler(u.String(), StatusMovedPermanently), patStr, nil, nil
+			return RedirectHandler(u.String(), StatusTemporaryRedirect), patStr, nil, nil
 		}
 	}
 	if n == nil {
@@ -2759,9 +2743,12 @@ func (mux *ServeMux) matchOrRedirect(host, method, path string, u *url.URL) (_ *
 	defer mux.mu.RUnlock()
 
 	n, matches := mux.tree.match(host, method, path)
-	// If we have an exact match, or we were asked not to try trailing-slash redirection,
-	// or the URL already has a trailing slash, then we're done.
-	if !exactMatch(n, path) && u != nil && !strings.HasSuffix(path, "/") {
+	// We can terminate here if any of the following is true:
+	// - We have an exact match already.
+	// - We were asked not to try trailing slash redirection.
+	// - The URL already has a trailing slash.
+	// - The URL is an empty string.
+	if !exactMatch(n, path) && u != nil && !strings.HasSuffix(path, "/") && path != "" {
 		// If there is an exact match with a trailing slash, then redirect.
 		path += "/"
 		n2, _ := mux.tree.match(host, method, path)
@@ -2865,8 +2852,10 @@ func (mux *ServeMux) ServeHTTP(w ResponseWriter, r *Request) {
 // always refers to user code.
 
 // Handle registers the handler for the given pattern.
-// If the given pattern conflicts with one that is already registered, Handle
-// panics.
+// If the given pattern conflicts with one that is already registered
+// or if the pattern is invalid, Handle panics.
+//
+// See [ServeMux] for details on valid patterns and conflict rules.
 func (mux *ServeMux) Handle(pattern string, handler Handler) {
 	if use121 {
 		mux.mux121.handle(pattern, handler)
@@ -2876,8 +2865,10 @@ func (mux *ServeMux) Handle(pattern string, handler Handler) {
 }
 
 // HandleFunc registers the handler function for the given pattern.
-// If the given pattern conflicts with one that is already registered, HandleFunc
-// panics.
+// If the given pattern conflicts with one that is already registered
+// or if the pattern is invalid, HandleFunc panics.
+//
+// See [ServeMux] for details on valid patterns and conflict rules.
 func (mux *ServeMux) HandleFunc(pattern string, handler func(ResponseWriter, *Request)) {
 	if use121 {
 		mux.mux121.handleFunc(pattern, handler)
@@ -3059,6 +3050,9 @@ type Server struct {
 	// automatically closed when the function returns.
 	// If TLSNextProto is not nil, HTTP/2 support is not enabled
 	// automatically.
+	//
+	// Historically, TLSNextProto was used to disable HTTP/2 support.
+	// The Server.Protocols field now provides a simpler way to do this.
 	TLSNextProto map[string]func(*Server, *tls.Conn, Handler)
 
 	// ConnState specifies an optional callback function that is
@@ -3087,9 +3081,6 @@ type Server struct {
 	ConnContext func(ctx context.Context, c net.Conn) context.Context
 
 	// HTTP2 configures HTTP/2 connections.
-	//
-	// This field does not yet have any effect.
-	// See https://go.dev/issue/67813.
 	HTTP2 *HTTP2Config
 
 	// Protocols is the set of protocols accepted by the server.

@@ -110,11 +110,12 @@ func trim(s []byte) []byte {
 	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
 		i++
 	}
-	n := len(s)
-	for n > i && (s[n-1] == ' ' || s[n-1] == '\t') {
+	s = s[i:]
+	n := len(s) - 1
+	for n >= 0 && (s[n] == ' ' || s[n] == '\t') {
 		n--
 	}
-	return s[i:n]
+	return s[:n+1]
 }
 
 // ReadContinuedLineBytes is like [Reader.ReadContinuedLine] but
@@ -179,7 +180,7 @@ func (r *Reader) readContinuedLineSlice(lim int64, validateFirstLine func([]byte
 		}
 		line, err := r.readLineSlice(lim - int64(len(r.buf)))
 		if err != nil {
-			break
+			return nil, err
 		}
 		r.buf = append(r.buf, trim(line)...)
 	}
@@ -214,13 +215,13 @@ func (r *Reader) readCodeLine(expectCode int) (code int, continued bool, message
 
 func parseCodeLine(line string, expectCode int) (code int, continued bool, message string, err error) {
 	if len(line) < 4 || line[3] != ' ' && line[3] != '-' {
-		err = ProtocolError("short response: " + line)
+		err = ProtocolError(fmt.Sprintf("short response: %q", line))
 		return
 	}
 	continued = line[3] == '-'
 	code, err = strconv.Atoi(line[0:3])
 	if err != nil || code < 100 {
-		err = ProtocolError("invalid response code: " + line)
+		err = ProtocolError(fmt.Sprintf("invalid response code: %q", line))
 		return
 	}
 	message = line[4:]
@@ -252,7 +253,7 @@ func parseCodeLine(line string, expectCode int) (code int, continued bool, messa
 func (r *Reader) ReadCodeLine(expectCode int) (code int, message string, err error) {
 	code, continued, message, err := r.readCodeLine(expectCode)
 	if err == nil && continued {
-		err = ProtocolError("unexpected multi-line response: " + message)
+		err = ProtocolError(fmt.Sprintf("unexpected multi-line response: %q", message))
 	}
 	return
 }
@@ -513,6 +514,10 @@ func (r *Reader) ReadMIMEHeader() (MIMEHeader, error) {
 // readMIMEHeader is a version of ReadMIMEHeader which takes a limit on the header size.
 // It is called by the mime/multipart package.
 func readMIMEHeader(r *Reader, maxMemory, maxHeaders int64) (MIMEHeader, error) {
+	if maxMemory < 0 {
+		return nil, errMessageTooLarge
+	}
+
 	// Avoid lots of small slice allocations later by allocating one
 	// large one ahead of time which we'll cut up into smaller
 	// slices. If this isn't big enough later, we allocate small ones.
@@ -527,12 +532,6 @@ func readMIMEHeader(r *Reader, maxMemory, maxHeaders int64) (MIMEHeader, error) 
 
 	m := make(MIMEHeader, hint)
 
-	// Account for 400 bytes of overhead for the MIMEHeader, plus 200 bytes per entry.
-	// Benchmarking map creation as of go1.20, a one-entry MIMEHeader is 416 bytes and large
-	// MIMEHeaders average about 200 bytes per entry.
-	maxMemory -= 400
-	const mapEntryOverhead = 200
-
 	// The first line cannot start with a leading space.
 	if buf, err := r.R.Peek(1); err == nil && (buf[0] == ' ' || buf[0] == '\t') {
 		const errorLimit = 80 // arbitrary limit on how much of the line we'll quote
@@ -540,7 +539,7 @@ func readMIMEHeader(r *Reader, maxMemory, maxHeaders int64) (MIMEHeader, error) 
 		if err != nil {
 			return m, err
 		}
-		return m, ProtocolError("malformed MIME header initial line: " + string(line))
+		return m, ProtocolError(fmt.Sprintf("malformed MIME header initial line: %q", line))
 	}
 
 	for {
@@ -552,15 +551,15 @@ func readMIMEHeader(r *Reader, maxMemory, maxHeaders int64) (MIMEHeader, error) 
 		// Key ends at first colon.
 		k, v, ok := bytes.Cut(kv, colon)
 		if !ok {
-			return m, ProtocolError("malformed MIME header line: " + string(kv))
+			return m, ProtocolError(fmt.Sprintf("malformed MIME header line: %q", kv))
 		}
 		key, ok := canonicalMIMEHeaderKey(k)
 		if !ok {
-			return m, ProtocolError("malformed MIME header line: " + string(kv))
+			return m, ProtocolError(fmt.Sprintf("malformed MIME header line: %q", kv))
 		}
 		for _, c := range v {
 			if !validHeaderValueByte(c) {
-				return m, ProtocolError("malformed MIME header line: " + string(kv))
+				return m, ProtocolError(fmt.Sprintf("malformed MIME header line: %q", kv))
 			}
 		}
 
@@ -574,6 +573,10 @@ func readMIMEHeader(r *Reader, maxMemory, maxHeaders int64) (MIMEHeader, error) 
 
 		vv := m[key]
 		if vv == nil {
+			// Account for per-entry overhead.
+			// 200 bytes is based on benchmarks circa Go 1.20.
+			const mapEntryOverhead = 200
+
 			maxMemory -= int64(len(key))
 			maxMemory -= mapEntryOverhead
 		}

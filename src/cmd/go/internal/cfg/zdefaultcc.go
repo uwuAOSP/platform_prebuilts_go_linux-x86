@@ -6,10 +6,18 @@ const DefaultPkgConfig = `pkg-config`
 func DefaultCC(goos, goarch string) string {
 	switch goos+`/`+goarch {
 	}
-	return "/mnt/disks/build-disk/src/googleplex-android/build-tools-release/prebuilts/clang/host/linux-x86/clang-r584948/bin/clang"
+	switch goos {
+	case "darwin", "ios", "freebsd", "openbsd":
+		return "clang"
+	}
+	return "gcc"
 }
 func DefaultCXX(goos, goarch string) string {
 	switch goos+`/`+goarch {
 	}
-	return "/mnt/disks/build-disk/src/googleplex-android/build-tools-release/prebuilts/clang/host/linux-x86/clang-r584948/bin/clang++"
+	switch goos {
+	case "darwin", "ios", "freebsd", "openbsd":
+		return "clang++"
+	}
+	return "g++"
 }

@@ -218,7 +218,7 @@ func createDwarfVars(fnsym *obj.LSym, complexOK bool, fn *ir.Func, apDecls []*ir
 				continue
 			}
 			if n.Class != ir.PPARAMOUT || !n.IsOutputParamInRegisters() {
-				panic("invalid ir.Name on debugInfo.RegOutputParams list")
+				base.Fatalf("invalid ir.Name on debugInfo.RegOutputParams list")
 			}
 			dcl = append(dcl, n)
 		}
@@ -288,10 +288,14 @@ func createDwarfVars(fnsym *obj.LSym, complexOK bool, fn *ir.Func, apDecls []*ir
 			DictIndex:     n.DictIndex,
 			ClosureOffset: closureOffset(n, closureVars),
 		}
-		if n.Esc() == ir.EscHeap {
-			if n.Heapaddr == nil {
-				base.Fatalf("invalid heap allocated var without Heapaddr")
-			}
+		if n.Esc() == ir.EscHeap && n.Heapaddr != nil {
+			// The variable was promoted to the heap and has a known heap
+			// address, so describe its location by dereferencing the pointer
+			// stored at its stack offset. A heap-escaped variable may have no
+			// Heapaddr if it was declared in unreachable code: escape analysis
+			// marks it as heap-allocated, but SSA generation skips the dead
+			// declaration and never allocates the address. In that case fall
+			// through and emit a conservative variable with no location list.
 			debug := fn.DebugInfo.(*ssa.FuncDebug)
 			list := createHeapDerefLocationList(n, debug.EntryID)
 			dvar.PutLocationList = func(listSym, startPC dwarf.Sym) {
@@ -598,7 +602,7 @@ func createHeapDerefLocationList(n *ir.Name, entryID ssa.ID) []byte {
 // in the DWARF info.
 func RecordFlags(flags ...string) {
 	if base.Ctxt.Pkgpath == "" {
-		panic("missing pkgpath")
+		base.Fatalf("missing pkgpath")
 	}
 
 	type BoolFlag interface {
