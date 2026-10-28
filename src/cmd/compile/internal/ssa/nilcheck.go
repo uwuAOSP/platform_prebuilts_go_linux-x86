@@ -221,7 +221,8 @@ func nilcheckelim2(f *Func) {
 
 				// Iteration order means that first nilcheck in the chain wins, others
 				// are bumped into the ordinary statement preservation algorithm.
-				u := b.Values[unnecessary.get(v.Args[0].ID)]
+				uid, _ := unnecessary.get(v.Args[0].ID)
+				u := b.Values[uid]
 				if !u.Type.IsMemory() && !u.Pos.SameFileAndLine(v.Pos) {
 					if u.Pos.IsStmt() == src.PosIsStmt {
 						pendingLines.add(u.Pos)
@@ -301,7 +302,7 @@ func nilcheckelim2(f *Func) {
 				case auxInt64:
 					// ARM uses this auxType for duffcopy/duffzero/alignment info.
 					// It does not affect the effective address.
-				case auxNone:
+				case auxNone, auxSizeAndAlign:
 					// offset is zero.
 				default:
 					v.Fatalf("can't handle aux %s (type %d) yet\n", v.auxString(), int(opcodeTable[v.Op].auxType))

@@ -49,7 +49,7 @@ func riscv64RegName(r int) string {
 
 func init() {
 	var regNamesRISCV64 []string
-	var gpMask, fpMask, gpgMask, gpspMask, gpspsbMask, gpspsbgMask regMask
+	var gpMask, fpMask, gpgMask, gpspMask, gpspsbMask, gpspsbgMask, first16Mask regMask
 	regNamed := make(map[string]regMask)
 
 	// Build the list of register names, creating an appropriately indexed
@@ -93,10 +93,13 @@ func init() {
 			gpspMask |= mask
 			gpspsbMask |= mask
 			gpspsbgMask |= mask
+			if r >= 5 && r < 5+16 {
+				first16Mask |= mask
+			}
 		}
 	}
 
-	// Floating pointer registers.
+	// Floating point registers.
 	for r := 32; r <= 63; r++ {
 		mask := addreg(r, "")
 		fpMask |= mask
@@ -114,6 +117,7 @@ func init() {
 
 	regCtxt := regNamed["X26"]
 	callerSave := gpMask | fpMask | regNamed["g"]
+	r5toR6 := regNamed["X5"] | regNamed["X6"]
 
 	var (
 		gpstore  = regInfo{inputs: []regMask{gpspsbMask, gpspMask, 0}} // SB in first input so we can load from a global, but not in second to avoid using SB as a temporary register
@@ -128,6 +132,7 @@ func init() {
 		gpcas    = regInfo{inputs: []regMask{gpspsbgMask, gpgMask, gpgMask}, outputs: []regMask{gpMask}}
 		gpatomic = regInfo{inputs: []regMask{gpspsbgMask, gpgMask}}
 
+		fp01    = regInfo{outputs: []regMask{fpMask}}
 		fp11    = regInfo{inputs: []regMask{fpMask}, outputs: []regMask{fpMask}}
 		fp21    = regInfo{inputs: []regMask{fpMask, fpMask}, outputs: []regMask{fpMask}}
 		fp31    = regInfo{inputs: []regMask{fpMask, fpMask, fpMask}, outputs: []regMask{fpMask}}
@@ -172,28 +177,30 @@ func init() {
 		{name: "MOVaddr", argLength: 1, reg: gp11sb, asm: "MOV", aux: "SymOff", rematerializeable: true, symEffect: "Addr"}, // arg0 + auxint + offset encoded in aux
 		// auxint+aux == add auxint and the offset of the symbol in aux (if any) to the effective address
 
-		{name: "MOVDconst", reg: gp01, asm: "MOV", typ: "UInt64", aux: "Int64", rematerializeable: true}, // auxint
+		{name: "MOVDconst", reg: gp01, asm: "MOV", typ: "UInt64", aux: "Int64", rematerializeable: true},      // auxint
+		{name: "FMOVDconst", reg: fp01, asm: "MOVD", typ: "Float64", aux: "Float64", rematerializeable: true}, // auxint
+		{name: "FMOVFconst", reg: fp01, asm: "MOVF", typ: "Float32", aux: "Float32", rematerializeable: true}, // auxint
 
 		// Loads: load <size> bits from arg0+auxint+aux and extend to 64 bits; arg1=mem
-		{name: "MOVBload", argLength: 2, reg: gpload, asm: "MOVB", aux: "SymOff", typ: "Int8", faultOnNilArg0: true, symEffect: "Read"},     //  8 bits, sign extend
-		{name: "MOVHload", argLength: 2, reg: gpload, asm: "MOVH", aux: "SymOff", typ: "Int16", faultOnNilArg0: true, symEffect: "Read"},    // 16 bits, sign extend
-		{name: "MOVWload", argLength: 2, reg: gpload, asm: "MOVW", aux: "SymOff", typ: "Int32", faultOnNilArg0: true, symEffect: "Read"},    // 32 bits, sign extend
-		{name: "MOVDload", argLength: 2, reg: gpload, asm: "MOV", aux: "SymOff", typ: "Int64", faultOnNilArg0: true, symEffect: "Read"},     // 64 bits
-		{name: "MOVBUload", argLength: 2, reg: gpload, asm: "MOVBU", aux: "SymOff", typ: "UInt8", faultOnNilArg0: true, symEffect: "Read"},  //  8 bits, zero extend
-		{name: "MOVHUload", argLength: 2, reg: gpload, asm: "MOVHU", aux: "SymOff", typ: "UInt16", faultOnNilArg0: true, symEffect: "Read"}, // 16 bits, zero extend
-		{name: "MOVWUload", argLength: 2, reg: gpload, asm: "MOVWU", aux: "SymOff", typ: "UInt32", faultOnNilArg0: true, symEffect: "Read"}, // 32 bits, zero extend
+		{name: "MOVBload", argLength: 2, reg: gpload, asm: "MOVB", aux: "SymOff", typ: "Int8", faultOnNilArg0: true, symEffect: "Read", addrSinkArg0: true},     //  8 bits, sign extend
+		{name: "MOVHload", argLength: 2, reg: gpload, asm: "MOVH", aux: "SymOff", typ: "Int16", faultOnNilArg0: true, symEffect: "Read", addrSinkArg0: true},    // 16 bits, sign extend
+		{name: "MOVWload", argLength: 2, reg: gpload, asm: "MOVW", aux: "SymOff", typ: "Int32", faultOnNilArg0: true, symEffect: "Read", addrSinkArg0: true},    // 32 bits, sign extend
+		{name: "MOVDload", argLength: 2, reg: gpload, asm: "MOV", aux: "SymOff", typ: "Int64", faultOnNilArg0: true, symEffect: "Read", addrSinkArg0: true},     // 64 bits
+		{name: "MOVBUload", argLength: 2, reg: gpload, asm: "MOVBU", aux: "SymOff", typ: "UInt8", faultOnNilArg0: true, symEffect: "Read", addrSinkArg0: true},  //  8 bits, zero extend
+		{name: "MOVHUload", argLength: 2, reg: gpload, asm: "MOVHU", aux: "SymOff", typ: "UInt16", faultOnNilArg0: true, symEffect: "Read", addrSinkArg0: true}, // 16 bits, zero extend
+		{name: "MOVWUload", argLength: 2, reg: gpload, asm: "MOVWU", aux: "SymOff", typ: "UInt32", faultOnNilArg0: true, symEffect: "Read", addrSinkArg0: true}, // 32 bits, zero extend
 
 		// Stores: store <size> lowest bits in arg1 to arg0+auxint+aux; arg2=mem
-		{name: "MOVBstore", argLength: 3, reg: gpstore, asm: "MOVB", aux: "SymOff", typ: "Mem", faultOnNilArg0: true, symEffect: "Write"}, //  8 bits
-		{name: "MOVHstore", argLength: 3, reg: gpstore, asm: "MOVH", aux: "SymOff", typ: "Mem", faultOnNilArg0: true, symEffect: "Write"}, // 16 bits
-		{name: "MOVWstore", argLength: 3, reg: gpstore, asm: "MOVW", aux: "SymOff", typ: "Mem", faultOnNilArg0: true, symEffect: "Write"}, // 32 bits
-		{name: "MOVDstore", argLength: 3, reg: gpstore, asm: "MOV", aux: "SymOff", typ: "Mem", faultOnNilArg0: true, symEffect: "Write"},  // 64 bits
+		{name: "MOVBstore", argLength: 3, reg: gpstore, asm: "MOVB", aux: "SymOff", typ: "Mem", faultOnNilArg0: true, symEffect: "Write", addrSinkArg0: true}, //  8 bits
+		{name: "MOVHstore", argLength: 3, reg: gpstore, asm: "MOVH", aux: "SymOff", typ: "Mem", faultOnNilArg0: true, symEffect: "Write", addrSinkArg0: true}, // 16 bits
+		{name: "MOVWstore", argLength: 3, reg: gpstore, asm: "MOVW", aux: "SymOff", typ: "Mem", faultOnNilArg0: true, symEffect: "Write", addrSinkArg0: true}, // 32 bits
+		{name: "MOVDstore", argLength: 3, reg: gpstore, asm: "MOV", aux: "SymOff", typ: "Mem", faultOnNilArg0: true, symEffect: "Write", addrSinkArg0: true},  // 64 bits
 
 		// Stores: store <size> of zero in arg0+auxint+aux; arg1=mem
-		{name: "MOVBstorezero", argLength: 2, reg: gpstore0, aux: "SymOff", asm: "MOVB", typ: "Mem", faultOnNilArg0: true, symEffect: "Write"}, //  8 bits
-		{name: "MOVHstorezero", argLength: 2, reg: gpstore0, aux: "SymOff", asm: "MOVH", typ: "Mem", faultOnNilArg0: true, symEffect: "Write"}, // 16 bits
-		{name: "MOVWstorezero", argLength: 2, reg: gpstore0, aux: "SymOff", asm: "MOVW", typ: "Mem", faultOnNilArg0: true, symEffect: "Write"}, // 32 bits
-		{name: "MOVDstorezero", argLength: 2, reg: gpstore0, aux: "SymOff", asm: "MOV", typ: "Mem", faultOnNilArg0: true, symEffect: "Write"},  // 64 bits
+		{name: "MOVBstorezero", argLength: 2, reg: gpstore0, aux: "SymOff", asm: "MOVB", typ: "Mem", faultOnNilArg0: true, symEffect: "Write", addrSinkArg0: true}, //  8 bits
+		{name: "MOVHstorezero", argLength: 2, reg: gpstore0, aux: "SymOff", asm: "MOVH", typ: "Mem", faultOnNilArg0: true, symEffect: "Write", addrSinkArg0: true}, // 16 bits
+		{name: "MOVWstorezero", argLength: 2, reg: gpstore0, aux: "SymOff", asm: "MOVW", typ: "Mem", faultOnNilArg0: true, symEffect: "Write", addrSinkArg0: true}, // 32 bits
+		{name: "MOVDstorezero", argLength: 2, reg: gpstore0, aux: "SymOff", asm: "MOV", typ: "Mem", faultOnNilArg0: true, symEffect: "Write", addrSinkArg0: true},  // 64 bits
 
 		// Conversions
 		{name: "MOVBreg", argLength: 1, reg: gp11, asm: "MOVB"},   // move from arg0, sign-extended from byte
@@ -274,91 +281,98 @@ func init() {
 		{name: "CALLclosure", argLength: -1, reg: callClosure, aux: "CallOff", call: true},       // call function via closure. arg0=codeptr, arg1=closure, last arg=mem, auxint=argsize, returns mem
 		{name: "CALLinter", argLength: -1, reg: callInter, aux: "CallOff", call: true},           // call fn by pointer. arg0=codeptr, last arg=mem, auxint=argsize, returns mem
 
-		// duffzero
-		// arg0 = address of memory to zero (in X25, changed as side effect)
-		// arg1 = mem
-		// auxint = offset into duffzero code to start executing
-		// X1 (link register) changed because of function call
-		// returns mem
-		{
-			name:      "DUFFZERO",
-			aux:       "Int64",
-			argLength: 2,
-			reg: regInfo{
-				inputs:   []regMask{regNamed["X25"]},
-				clobbers: regNamed["X1"] | regNamed["X25"],
-			},
-			typ:            "Mem",
-			faultOnNilArg0: true,
-		},
-
-		// duffcopy
-		// arg0 = address of dst memory (in X25, changed as side effect)
-		// arg1 = address of src memory (in X24, changed as side effect)
-		// arg2 = mem
-		// auxint = offset into duffcopy code to start executing
-		// X1 (link register) changed because of function call
-		// returns mem
-		{
-			name:      "DUFFCOPY",
-			aux:       "Int64",
-			argLength: 3,
-			reg: regInfo{
-				inputs:   []regMask{regNamed["X25"], regNamed["X24"]},
-				clobbers: regNamed["X1"] | regNamed["X24"] | regNamed["X25"],
-			},
-			typ:            "Mem",
-			faultOnNilArg0: true,
-			faultOnNilArg1: true,
-		},
-
 		// Generic moves and zeros
 
-		// general unaligned zeroing
-		// arg0 = address of memory to zero (in X5, changed as side effect)
-		// arg1 = address of the last element to zero (inclusive)
-		// arg2 = mem
-		// auxint = element size
+		// general unrolled zeroing
+		// arg0 = address of memory to zero
+		// arg1 = mem
+		// auxint = size
+		// aux = alignment (as an int64)
 		// returns mem
-		//	mov	ZERO, (X5)
-		//	ADD	$sz, X5
-		//	BGEU	Rarg1, X5, -2(PC)
+		//	mov	ZERO, (OFFSET)(Rarg0)
 		{
-			name:      "LoweredZero",
-			aux:       "Int64",
-			argLength: 3,
-			reg: regInfo{
-				inputs:   []regMask{regNamed["X5"], gpMask},
-				clobbers: regNamed["X5"],
-			},
+			name:           "LoweredZero",
+			aux:            "SizeAndAlign",
 			typ:            "Mem",
+			argLength:      2,
 			faultOnNilArg0: true,
+			addrSinkArg0:   true,
+			reg: regInfo{
+				inputs: []regMask{gpMask},
+			},
+		},
+		// general unaligned zeroing
+		// arg0 = address of memory to zero (clobber)
+		// arg1 = mem
+		// auxint = size
+		// aux = alignment (as an int64)
+		// returns mem
+		{
+			name:           "LoweredZeroLoop",
+			aux:            "SizeAndAlign",
+			typ:            "Mem",
+			argLength:      2,
+			needIntTemp:    true,
+			faultOnNilArg0: true,
+			addrSinkArg0:   true,
+			reg: regInfo{
+				inputs:       []regMask{gpMask},
+				clobbersArg0: true,
+			},
 		},
 
 		// general unaligned move
-		// arg0 = address of dst memory (in X5, changed as side effect)
-		// arg1 = address of src memory (in X6, changed as side effect)
-		// arg2 = address of the last element of src (can't be X7 as we clobber it before using arg2)
-		// arg3 = mem
-		// auxint = alignment
-		// clobbers X7 as a tmp register.
+		// arg0 = address of dst memory (clobber)
+		// arg1 = address of src memory (clobber)
+		// arg2 = mem
+		// auxint = size
+		// aux = alignment (as an int64)
 		// returns mem
-		//	mov	(X6), X7
-		//	mov	X7, (X5)
-		//	ADD	$sz, X5
-		//	ADD	$sz, X6
-		//	BGEU	Rarg2, X5, -4(PC)
+		//	mov	(offset)(Rarg1), TMP
+		//	mov	TMP, (offset)(Rarg0)
 		{
 			name:      "LoweredMove",
-			aux:       "Int64",
-			argLength: 4,
+			aux:       "SizeAndAlign",
+			argLength: 3,
 			reg: regInfo{
-				inputs:   []regMask{regNamed["X5"], regNamed["X6"], gpMask &^ regNamed["X7"]},
-				clobbers: regNamed["X5"] | regNamed["X6"] | regNamed["X7"],
+				inputs:   []regMask{gpMask &^ regNamed["X5"], gpMask &^ regNamed["X5"]},
+				clobbers: regNamed["X5"],
 			},
-			typ:            "Mem",
 			faultOnNilArg0: true,
 			faultOnNilArg1: true,
+			addrSinkArg0:   true,
+			addrSinkArg1:   true,
+		},
+
+		// general unaligned move
+		// arg0 = address of dst memory (clobber)
+		// arg1 = address of src memory (clobber)
+		// arg2 = mem
+		// auxint = size
+		// aux = alignment (as an int64)
+		// returns mem
+		//	ADD	$sz, X6
+		//loop:
+		//	mov	(Rarg1), X5
+		//	mov	X5, (Rarg0)
+		//	...rest 7 mov...
+		//	ADD	$sz, Rarg0
+		//	ADD	$sz, Rarg1
+		//	BNE	X6, Rarg1, loop
+		{
+			name:      "LoweredMoveLoop",
+			aux:       "SizeAndAlign",
+			argLength: 3,
+			reg: regInfo{
+				inputs:       []regMask{gpMask &^ r5toR6, gpMask &^ r5toR6},
+				clobbers:     r5toR6,
+				clobbersArg0: true,
+				clobbersArg1: true,
+			},
+			faultOnNilArg0: true,
+			faultOnNilArg1: true,
+			addrSinkArg0:   true,
+			addrSinkArg1:   true,
 		},
 
 		// Atomic loads.
@@ -429,37 +443,41 @@ func init() {
 		// Do data barrier. arg0=memorys
 		{name: "LoweredPubBarrier", argLength: 1, asm: "FENCE", hasSideEffects: true},
 
-		// There are three of these functions so that they can have three different register inputs.
-		// When we check 0 <= c <= cap (A), then 0 <= b <= c (B), then 0 <= a <= b (C), we want the
-		// default registers to match so we don't need to copy registers around unnecessarily.
-		{name: "LoweredPanicBoundsA", argLength: 3, aux: "Int64", reg: regInfo{inputs: []regMask{regNamed["X7"], regNamed["X28"]}}, typ: "Mem", call: true}, // arg0=idx, arg1=len, arg2=mem, returns memory. AuxInt contains report code (see PanicBounds in genericOps.go).
-		{name: "LoweredPanicBoundsB", argLength: 3, aux: "Int64", reg: regInfo{inputs: []regMask{regNamed["X6"], regNamed["X7"]}}, typ: "Mem", call: true},  // arg0=idx, arg1=len, arg2=mem, returns memory. AuxInt contains report code (see PanicBounds in genericOps.go).
-		{name: "LoweredPanicBoundsC", argLength: 3, aux: "Int64", reg: regInfo{inputs: []regMask{regNamed["X5"], regNamed["X6"]}}, typ: "Mem", call: true},  // arg0=idx, arg1=len, arg2=mem, returns memory. AuxInt contains report code (see PanicBounds in genericOps.go).
+		// LoweredPanicBoundsRR takes x and y, two values that caused a bounds check to fail.
+		// the RC and CR versions are used when one of the arguments is a constant. CC is used
+		// when both are constant (normally both 0, as prove derives the fact that a [0] bounds
+		// failure means the length must have also been 0).
+		// AuxInt contains a report code (see PanicBounds in genericOps.go).
+		{name: "LoweredPanicBoundsRR", argLength: 3, aux: "Int64", reg: regInfo{inputs: []regMask{first16Mask, first16Mask}}, typ: "Mem", call: true}, // arg0=x, arg1=y, arg2=mem, returns memory.
+		{name: "LoweredPanicBoundsRC", argLength: 2, aux: "PanicBoundsC", reg: regInfo{inputs: []regMask{first16Mask}}, typ: "Mem", call: true},       // arg0=x, arg1=mem, returns memory.
+		{name: "LoweredPanicBoundsCR", argLength: 2, aux: "PanicBoundsC", reg: regInfo{inputs: []regMask{first16Mask}}, typ: "Mem", call: true},       // arg0=y, arg1=mem, returns memory.
+		{name: "LoweredPanicBoundsCC", argLength: 1, aux: "PanicBoundsCC", reg: regInfo{}, typ: "Mem", call: true},                                    // arg0=mem, returns memory.
 
 		// F extension.
-		{name: "FADDS", argLength: 2, reg: fp21, asm: "FADDS", commutative: true, typ: "Float32"},                                           // arg0 + arg1
-		{name: "FSUBS", argLength: 2, reg: fp21, asm: "FSUBS", commutative: false, typ: "Float32"},                                          // arg0 - arg1
-		{name: "FMULS", argLength: 2, reg: fp21, asm: "FMULS", commutative: true, typ: "Float32"},                                           // arg0 * arg1
-		{name: "FDIVS", argLength: 2, reg: fp21, asm: "FDIVS", commutative: false, typ: "Float32"},                                          // arg0 / arg1
-		{name: "FMADDS", argLength: 3, reg: fp31, asm: "FMADDS", commutative: true, typ: "Float32"},                                         // (arg0 * arg1) + arg2
-		{name: "FMSUBS", argLength: 3, reg: fp31, asm: "FMSUBS", commutative: true, typ: "Float32"},                                         // (arg0 * arg1) - arg2
-		{name: "FNMADDS", argLength: 3, reg: fp31, asm: "FNMADDS", commutative: true, typ: "Float32"},                                       // -(arg0 * arg1) + arg2
-		{name: "FNMSUBS", argLength: 3, reg: fp31, asm: "FNMSUBS", commutative: true, typ: "Float32"},                                       // -(arg0 * arg1) - arg2
-		{name: "FSQRTS", argLength: 1, reg: fp11, asm: "FSQRTS", typ: "Float32"},                                                            // sqrt(arg0)
-		{name: "FNEGS", argLength: 1, reg: fp11, asm: "FNEGS", typ: "Float32"},                                                              // -arg0
-		{name: "FMVSX", argLength: 1, reg: gpfp, asm: "FMVSX", typ: "Float32"},                                                              // reinterpret arg0 as float
-		{name: "FCVTSW", argLength: 1, reg: gpfp, asm: "FCVTSW", typ: "Float32"},                                                            // float32(low 32 bits of arg0)
-		{name: "FCVTSL", argLength: 1, reg: gpfp, asm: "FCVTSL", typ: "Float32"},                                                            // float32(arg0)
-		{name: "FCVTWS", argLength: 1, reg: fpgp, asm: "FCVTWS", typ: "Int32"},                                                              // int32(arg0)
-		{name: "FCVTLS", argLength: 1, reg: fpgp, asm: "FCVTLS", typ: "Int64"},                                                              // int64(arg0)
-		{name: "FMOVWload", argLength: 2, reg: fpload, asm: "MOVF", aux: "SymOff", typ: "Float32", faultOnNilArg0: true, symEffect: "Read"}, // load float32 from arg0+auxint+aux
-		{name: "FMOVWstore", argLength: 3, reg: fpstore, asm: "MOVF", aux: "SymOff", typ: "Mem", faultOnNilArg0: true, symEffect: "Write"},  // store float32 to arg0+auxint+aux
-		{name: "FEQS", argLength: 2, reg: fp2gp, asm: "FEQS", commutative: true},                                                            // arg0 == arg1
-		{name: "FNES", argLength: 2, reg: fp2gp, asm: "FNES", commutative: true},                                                            // arg0 != arg1
-		{name: "FLTS", argLength: 2, reg: fp2gp, asm: "FLTS"},                                                                               // arg0 < arg1
-		{name: "FLES", argLength: 2, reg: fp2gp, asm: "FLES"},                                                                               // arg0 <= arg1
-		{name: "LoweredFMAXS", argLength: 2, reg: fp21, resultNotInArgs: true, asm: "FMAXS", commutative: true, typ: "Float32"},             // max(arg0, arg1)
-		{name: "LoweredFMINS", argLength: 2, reg: fp21, resultNotInArgs: true, asm: "FMINS", commutative: true, typ: "Float32"},             // min(arg0, arg1)
+		{name: "FADDS", argLength: 2, reg: fp21, asm: "FADDS", commutative: true, typ: "Float32"},                                                               // arg0 + arg1
+		{name: "FSUBS", argLength: 2, reg: fp21, asm: "FSUBS", commutative: false, typ: "Float32"},                                                              // arg0 - arg1
+		{name: "FMULS", argLength: 2, reg: fp21, asm: "FMULS", commutative: true, typ: "Float32"},                                                               // arg0 * arg1
+		{name: "FDIVS", argLength: 2, reg: fp21, asm: "FDIVS", commutative: false, typ: "Float32"},                                                              // arg0 / arg1
+		{name: "FMADDS", argLength: 3, reg: fp31, asm: "FMADDS", commutative: true, typ: "Float32"},                                                             // (arg0 * arg1) + arg2
+		{name: "FMSUBS", argLength: 3, reg: fp31, asm: "FMSUBS", commutative: true, typ: "Float32"},                                                             // (arg0 * arg1) - arg2
+		{name: "FNMADDS", argLength: 3, reg: fp31, asm: "FNMADDS", commutative: true, typ: "Float32"},                                                           // -(arg0 * arg1) + arg2
+		{name: "FNMSUBS", argLength: 3, reg: fp31, asm: "FNMSUBS", commutative: true, typ: "Float32"},                                                           // -(arg0 * arg1) - arg2
+		{name: "FSQRTS", argLength: 1, reg: fp11, asm: "FSQRTS", typ: "Float32"},                                                                                // sqrt(arg0)
+		{name: "FNEGS", argLength: 1, reg: fp11, asm: "FNEGS", typ: "Float32"},                                                                                  // -arg0
+		{name: "FMVSX", argLength: 1, reg: gpfp, asm: "FMVSX", typ: "Float32"},                                                                                  // reinterpret arg0 as float32
+		{name: "FMVXS", argLength: 1, reg: fpgp, asm: "FMVXS", typ: "Int32"},                                                                                    // reinterpret arg0 as int32, sign extended to 64 bits
+		{name: "FCVTSW", argLength: 1, reg: gpfp, asm: "FCVTSW", typ: "Float32"},                                                                                // float32(low 32 bits of arg0)
+		{name: "FCVTSL", argLength: 1, reg: gpfp, asm: "FCVTSL", typ: "Float32"},                                                                                // float32(arg0)
+		{name: "FCVTWS", argLength: 1, reg: fpgp, asm: "FCVTWS", typ: "Int32"},                                                                                  // int32(arg0)
+		{name: "FCVTLS", argLength: 1, reg: fpgp, asm: "FCVTLS", typ: "Int64"},                                                                                  // int64(arg0)
+		{name: "FMOVWload", argLength: 2, reg: fpload, asm: "MOVF", aux: "SymOff", typ: "Float32", faultOnNilArg0: true, symEffect: "Read", addrSinkArg0: true}, // load float32 from arg0+auxint+aux
+		{name: "FMOVWstore", argLength: 3, reg: fpstore, asm: "MOVF", aux: "SymOff", typ: "Mem", faultOnNilArg0: true, symEffect: "Write", addrSinkArg0: true},  // store float32 to arg0+auxint+aux
+		{name: "FEQS", argLength: 2, reg: fp2gp, asm: "FEQS", commutative: true},                                                                                // arg0 == arg1
+		{name: "FNES", argLength: 2, reg: fp2gp, asm: "FNES", commutative: true},                                                                                // arg0 != arg1
+		{name: "FLTS", argLength: 2, reg: fp2gp, asm: "FLTS"},                                                                                                   // arg0 < arg1
+		{name: "FLES", argLength: 2, reg: fp2gp, asm: "FLES"},                                                                                                   // arg0 <= arg1
+		{name: "LoweredFMAXS", argLength: 2, reg: fp21, resultNotInArgs: true, asm: "FMAXS", commutative: true, typ: "Float32"},                                 // max(arg0, arg1)
+		{name: "LoweredFMINS", argLength: 2, reg: fp21, resultNotInArgs: true, asm: "FMINS", commutative: true, typ: "Float32"},                                 // min(arg0, arg1)
 
 		// D extension.
 		{name: "FADDD", argLength: 2, reg: fp21, asm: "FADDD", commutative: true, typ: "Float64"},                                           // arg0 + arg1
@@ -474,7 +492,8 @@ func init() {
 		{name: "FNEGD", argLength: 1, reg: fp11, asm: "FNEGD", typ: "Float64"},                                                              // -arg0
 		{name: "FABSD", argLength: 1, reg: fp11, asm: "FABSD", typ: "Float64"},                                                              // abs(arg0)
 		{name: "FSGNJD", argLength: 2, reg: fp21, asm: "FSGNJD", typ: "Float64"},                                                            // copy sign of arg1 to arg0
-		{name: "FMVDX", argLength: 1, reg: gpfp, asm: "FMVDX", typ: "Float64"},                                                              // reinterpret arg0 as float
+		{name: "FMVDX", argLength: 1, reg: gpfp, asm: "FMVDX", typ: "Float64"},                                                              // reinterpret arg0 as float64
+		{name: "FMVXD", argLength: 1, reg: fpgp, asm: "FMVXD", typ: "Int64"},                                                                // reinterpret arg0 as int64
 		{name: "FCVTDW", argLength: 1, reg: gpfp, asm: "FCVTDW", typ: "Float64"},                                                            // float64(low 32 bits of arg0)
 		{name: "FCVTDL", argLength: 1, reg: gpfp, asm: "FCVTDL", typ: "Float64"},                                                            // float64(arg0)
 		{name: "FCVTWD", argLength: 1, reg: fpgp, asm: "FCVTWD", typ: "Int32"},                                                              // int32(arg0)
@@ -489,6 +508,27 @@ func init() {
 		{name: "FLED", argLength: 2, reg: fp2gp, asm: "FLED"},                                                                               // arg0 <= arg1
 		{name: "LoweredFMIND", argLength: 2, reg: fp21, resultNotInArgs: true, asm: "FMIND", commutative: true, typ: "Float64"},             // min(arg0, arg1)
 		{name: "LoweredFMAXD", argLength: 2, reg: fp21, resultNotInArgs: true, asm: "FMAXD", commutative: true, typ: "Float64"},             // max(arg0, arg1)
+
+		// Floating point classify (in the F and D extensions).
+		//
+		// The FCLASS instructions will always set exactly one bit in the output
+		// register, all other bits will be cleared.
+		//
+		//   Bit | Class
+		//   ====+=============================
+		//     0 | -∞
+		//     1 | a negative normal number
+		//     2 | a negative subnormal number
+		//     3 | -0
+		//     4 | +0
+		//     5 | a positive subnormal number
+		//     6 | a positive normal number
+		//     7 | +∞
+		//     8 | qNaN
+		//     9 | sNaN
+		//   ====+=============================
+		{name: "FCLASSS", argLength: 1, reg: fpgp, asm: "FCLASSS", typ: "Int64"}, // classify float32
+		{name: "FCLASSD", argLength: 1, reg: fpgp, asm: "FCLASSD", typ: "Int64"}, // classify float64
 	}
 
 	RISCV64blocks := []blockData{
